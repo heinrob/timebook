@@ -39,6 +39,7 @@ import os
 import subprocess
 import sys
 import time
+import re
 
 from timebook import dbutil, cmdutil
 
@@ -119,7 +120,7 @@ def backend(db):
     subprocess.call(('sqlite3', db.path))
 
 @command(name='in', aliases=('start',))
-def in_(db, description='', switch=None, out=False, at=None, resume=False,
+def in_(db, description='', namespace=None, out=False, at=None, resume=False,
         extra=None):
     """Start the timer for the current timesheet
 
@@ -130,16 +131,16 @@ def in_(db, description='', switch=None, out=False, at=None, resume=False,
     `t in; t alter`.
 
     Options:
-      -s <timesheet>, --switch <timesheet>
+      -n <timesheet>, --namespace <timesheet>
                     Switch to another timesheet before starting the timer.
       -o, --out     Clock out before clocking in.
       -a <time>, --at <time>
                     Set time of clock-in.
       -r, --resume  Clock in with description of last active period.
     """
-    sheet = switch
+    sheet = namespace
     if sheet:
-        commands['switch'](db, timesheet=sheet)
+        commands['namespace'](db, timesheet=sheet)
     else:
         sheet = dbutil.get_current_sheet(db)
     if resume and description:
@@ -164,11 +165,11 @@ def in_(db, description='', switch=None, out=False, at=None, resume=False,
     ) values (?,?,?,?)
     ''', (sheet, timestamp, description, extra))
 
-@command(aliases=('delete',))
+@command()
 def kill(db, timesheet=None):
     """Delete a timesheet
 
-    Usage: t (kill | delete) [<timesheet>]
+    Usage: t kill [<timesheet>]
 
     Delete a timesheet. If no timesheet is specified, delete the current
     timesheet and switch to the default timesheet.
@@ -193,13 +194,13 @@ def kill(db, timesheet=None):
         return
     db.execute('delete from entry where sheet = ?', (to_delete,))
     if switch_to_default:
-        switch(db, timesheet='default')
+        namespace(db, timesheet='default')
 
-@command(aliases=('ls',))
+@command()
 def list(db, simple=False):
     """Show the available timesheets
 
-    Usage: t (list | ls) [-s, --simple]
+    Usage: t list [-s, --simple]
 
     Options:
       -s, --simple  Only display the names of the available timesheets.
@@ -261,12 +262,12 @@ def list(db, simple=False):
     cmdutil.pprint_table(table)
 
 @command()
-def switch(db, timesheet, verbose=False):
+def namespace(db, timesheet, verbose=False):
     """Switch to a new timesheet
 
-    Usage: t switch [options] <timesheet>
+    Usage: t namespace [options] <timesheet>
 
-    Switch to a new timesheet. This causes all future operation (except switch)
+    Switch to a new timesheet. This causes all future operation (except namespace)
     to operate on that timesheet. The default timesheet is called
     "default".
 
@@ -422,11 +423,11 @@ usage, see "%(prog)s --help".' % {'prog': os.path.basename(sys.argv[0])})
     else:
         print('%s: %s' % (sheet, active))
 
-@command(aliases=('export', 'format', 'show'))
-def display(db, timesheet=None, format='plain', start=None, end=None):
+@command(aliases=('export', 'format'))
+def display(db, timesheet=None, format='plain', start=None, end=None, merged=False):
     """Display a timesheet, by default the current one
 
-    Usage: t (display | export | format | show) [options] [<timesheet>]
+    Usage: t (display | export | format) [options] [<timesheet>]
 
     Display the data from a timesheet in the range of dates specified, either
     in the normal timebook fashion (using --format=plain) or as
@@ -508,7 +509,7 @@ def format_timebook(db, sheet, where):
     displ_date = lambda t: time.strftime('%b %d, %Y',
                                          time.localtime(t))
     displ_total = lambda t: \
-            cmdutil.timedelta_hms_display(timedelta(seconds=t))
+            cmdutil.timedelta_rounded(timedelta(seconds=t))
 
     last_day = None
     table = [['Day', 'Start      End', 'Duration', 'Notes']]
@@ -548,6 +549,8 @@ def format_timebook(db, sheet, where):
             enumerate(entries):
         date = displ_date(start)
         diff = displ_total(duration)
+        if re.match(r"^\d+$", description):
+            description = '%s/%s' % (db.config['DEFAULT']['link'], description)
         if end is None:
             trange = '%s -' % displ_time(start)
         else:
@@ -579,4 +582,125 @@ def format_timebook(db, sheet, where):
     total = displ_total(db.fetchone()[0])
     table += [['', '', displ_total(day_total), ''],
               ['Total', '', total, '']]
+    cmdutil.pprint_table(table, footer_row=True)
+
+@command(aliases=('merged',))
+def summary(db, timesheet, start=None, end=None):
+    """Display the summary of a timesheet, by default the current one
+
+    Usage: t (summary | merged) [options] [<timesheet>]
+
+    Display the data from a timesheet in the range of dates specified.
+
+    If a specific timesheet is given, display the same information for that
+    timesheet instead.
+
+    Options:
+      -s <date>, --start <date>
+                        Show only entries starting after 00:00 on this date.
+                        The date should be of the format YYYY-MM-DD.
+      -e <date>, --end <date>
+                        Show only entries ending before 00:00 on this date.
+                        The date should be of the format YYYY-MM-DD.
+
+    """
+    # grab correct sheet
+    if timesheet:
+        sheet = cmdutil.complete(dbutil.get_sheet_names(db), timesheet,
+                                 'timesheet')
+    else:
+        sheet = dbutil.get_current_sheet(db)
+
+    #calculate "where"
+    where = ''
+    if start is not None:
+        start_date = cmdutil.parse_date_time(start)
+        where += ' and start_time >= %s' % start_date
+    if end is not None:
+        end_date = cmdutil.parse_date_time(end)
+        where += ' and end_time <= %s' % end_date
+
+    db.execute('''
+    select count(*) > 0 from entry where sheet = ?%s
+    ''' % where, (sheet,))
+    if not db.fetchone()[0]:
+        print('(empty)')
+        return
+
+    displ_time = lambda t: time.strftime('%H:%M:%S', time.localtime(t))
+    displ_date = lambda t: time.strftime('%b %d, %Y',
+                                         time.localtime(t))
+    displ_total = lambda t: \
+            cmdutil.timedelta_rounded(timedelta(seconds=t))
+
+    last_day = None
+    table = [['Day', 'Duration', 'Notes']]
+    db.execute('''
+    select
+        date(e.start_time, 'unixepoch', 'localtime') as day,
+        ifnull(sum(ifnull(e.end_time, strftime('%%s', 'now')) -
+                   e.start_time), 0) as day_total
+    from
+        entry e
+    where
+        e.sheet = ?%s
+    group by
+        day
+    order by
+        day asc;
+    ''' % where, (sheet,))
+    days = db.fetchall()
+    days_iter = iter(days)
+    db.execute('''
+    select
+        date(e.start_time, 'unixepoch', 'localtime') as day,
+        e.start_time as start,
+        e.end_time as end,
+        sum(ifnull(e.end_time, strftime('%%s', 'now')) - e.start_time) as
+            duration,
+        ifnull(e.description, '') as description
+    from
+        entry e
+    where
+        e.sheet = ?%s
+    group by
+        e.description
+    order by
+        e.start_time asc;
+    ''' % where, (sheet,))
+
+    entries = db.fetchall()
+    for i, (day, start, end, duration, description) in \
+            enumerate(entries):
+        date = displ_date(start)
+        diff = displ_total(duration)
+        if re.match(r"^\d+$", description):
+            description = '%s/%s' % (db.config['DEFAULT']['link'], description)
+        if last_day == day:
+            # If this row doesn't represent the first entry of the
+            # day, don't display anything in the day column.
+            table.append(['', diff, description])
+        else:
+            if last_day is not None:
+                # Use day_total set (below) from the previous
+                # iteration. This is skipped the first iteration,
+                # since last_day is None.
+                table.append(['', displ_total(day_total), ''])
+            cur_day, day_total = next(days_iter)
+            assert day == cur_day
+            table.append([date, diff, description])
+            last_day = day
+
+    db.execute('''
+    select
+        ifnull(sum(ifnull(e.end_time, strftime('%%s', 'now')) -
+                   e.start_time), 0) as total
+    from
+        entry e
+    where
+        e.sheet = ?%s;
+    ''' % where, (sheet,))
+    total = displ_total(db.fetchone()[0])
+    table += [['', displ_total(day_total), ''],
+              ['Total', total, '']]
     cmdutil.pprint_table(table, footer_row=True)

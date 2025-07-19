@@ -87,3 +87,8 @@ def timedelta_hms_display(timedelta):
     minutes = timedelta.seconds / 60 % 60
     seconds = timedelta.seconds % 60
     return '%02d:%02d:%02d' % (hours, minutes, seconds)
+
+def timedelta_rounded(td):
+    base = 15 * 60
+    rounded_seconds = base * round(td.seconds/base)
+    return timedelta_hms_display(datetime.timedelta(days=td.days,seconds=rounded_seconds))
